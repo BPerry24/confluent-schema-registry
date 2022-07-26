@@ -57,9 +57,11 @@ export interface ConfluentSubject {
   name: string
 }
 
+export type SchemaReference = { name: string; subject: string; version?: number }
 export interface AvroConfluentSchema {
   type: SchemaType.AVRO
   schema: string | RawAvroSchema
+  references?: SchemaReference[]
 }
 
 export interface ProtoConfluentSchema {
@@ -73,6 +75,12 @@ export interface JsonConfluentSchema {
 }
 
 export type ConfluentSchema = AvroConfluentSchema | ProtoConfluentSchema | JsonConfluentSchema
+
+export type ConfluentSchemaResponse = {
+  schema: string
+  schemaType: string
+  references?: SchemaReference[]
+}
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
