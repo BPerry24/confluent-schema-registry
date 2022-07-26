@@ -21,12 +21,16 @@ import {
   ConfluentSubject,
   SchemaRegistryAPIClientOptions,
   AvroConfluentSchema,
+  ConfluentSchemaResponse,
+  SchemaReference,
+  ProtocolOptions,
 } from './@types'
 import {
   helperTypeFromSchemaType,
   schemaTypeFromString,
   schemaFromConfluentSchema,
 } from './schemaTypeResolver'
+import AvroHelper from 'AvroHelper'
 
 interface RegisteredSchema {
   id: number
@@ -109,6 +113,24 @@ export default class SchemaRegistry {
 
     const confluentSchema: ConfluentSchema = this.getConfluentSchema(schema)
 
+    if (confluentSchema.type === SchemaType.AVRO && confluentSchema.references?.length) {
+      const opts =
+        (this.options as ProtocolOptions) || ({ [SchemaType.AVRO]: {} } as ProtocolOptions)
+
+      const { references } = confluentSchema
+      const registry = await this.buildRegistry(references)
+      this.options = {
+        ...opts,
+        [SchemaType.AVRO]: {
+          ...(opts[SchemaType.AVRO] || {}),
+          registry: {
+            ...(opts[SchemaType.AVRO]?.registry || {}),
+            ...registry,
+          },
+        },
+      }
+    }
+
     const helper = helperTypeFromSchemaType(confluentSchema.type)
     const schemaInstance = schemaFromConfluentSchema(confluentSchema, this.options)
     helper.validate(schemaInstance)
@@ -132,7 +154,8 @@ export default class SchemaRegistry {
         )
       }
     } catch (error) {
-      if (error.status !== 404) {
+      const err = error as { status?: number }
+      if (err.status !== 404) {
         throw error
       }
 
@@ -166,12 +189,28 @@ export default class SchemaRegistry {
     }
 
     const response = await this.getSchemaOriginRequest(registryId)
-    const foundSchema: { schema: string; schemaType: string } = response.data()
-    const rawSchema = foundSchema.schema
-    const schemaType = schemaTypeFromString(foundSchema.schemaType)
+    const foundSchema = response.data<ConfluentSchemaResponse>()
+    const { schema: rawSchema, schemaType: rawSchemaType, references } = foundSchema
+    const schemaType = schemaTypeFromString(rawSchemaType)
 
     if (schemaType === SchemaType.UNKNOWN) {
       throw new ConfluentSchemaRegistryError(`Unknown schema type ${foundSchema.schemaType}`)
+    }
+
+    if (references && schemaType === SchemaType.AVRO) {
+      const opts = (this.options as ProtocolOptions) || { [SchemaType.AVRO]: {} }
+      const registry = await this.buildRegistry(references)
+
+      this.options = {
+        ...opts,
+        [SchemaType.AVRO]: {
+          ...(opts[SchemaType.AVRO] || {}),
+          registry: {
+            ...(opts[SchemaType.AVRO]?.registry || {}),
+            ...registry,
+          },
+        },
+      }
     }
 
     const confluentSchema: ConfluentSchema = {
@@ -186,7 +225,7 @@ export default class SchemaRegistry {
     return await (await this._getSchema(registryId)).schema
   }
 
-  public async encode(registryId: number, payload: any): Promise<Buffer> {
+  public async encode(registryId: number, payload: object): Promise<Buffer> {
     if (!registryId) {
       throw new ConfluentSchemaRegistryArgumentError(
         `Invalid registryId: ${JSON.stringify(registryId)}`,
@@ -279,7 +318,8 @@ export default class SchemaRegistry {
 
       return id
     } catch (error) {
-      if (error.status && error.status === 404) {
+      const err = error as { status?: number }
+      if (err.status && err.status === 404) {
         throw new ConfluentSchemaRegistryError(error)
       }
 
@@ -296,7 +336,7 @@ export default class SchemaRegistry {
 
   private getSchemaOriginRequest(registryId: number) {
     // ensure that cache-misses result in a single origin request
-    if (this.cacheMissRequests[registryId]) {
+    if (Object.hasOwnProperty.call(this.cacheMissRequests, registryId)) {
       return this.cacheMissRequests[registryId]
     } else {
       const request = this.api.Schema.find({ id: registryId }).finally(() => {
@@ -307,5 +347,25 @@ export default class SchemaRegistry {
 
       return request
     }
+  }
+
+  private async buildRegistry(references: SchemaReference[]) {
+    const registry: { [type: string]: Type } = {}
+
+    for (const ref of references) {
+      let schemaId
+
+      if (ref.version) {
+        schemaId = await this.getRegistryId(ref.subject, ref.version)
+      }
+
+      const schema = await this.getSchema(schemaId || (await this.getLatestSchemaId(ref.subject)))
+      const confluentSchema = this.getConfluentSchema(schema as AvroSchema)
+      const helper = helperTypeFromSchemaType(confluentSchema.type) as AvroHelper
+      const rawSchema = helper['getRawAvroSchema'](confluentSchema)
+      registry[ref.subject] = Type.forSchema(rawSchema)
+    }
+
+    return registry
   }
 }
